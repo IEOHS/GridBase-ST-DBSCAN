@@ -1,3 +1,4 @@
+using ArchGDAL: summarize
 using Base: root_module_exists
 using Distributed
 using BenchmarkTools
@@ -7,12 +8,12 @@ using Statistics
 using ProgressMeter
 #using RCall
 
-#=
+"""
 ST-DBSCAN
 @article{birant2007st,
   title={ST-DBSCAN: An algorithm for clustering spatial--temporal data},
   author={Birant, Derya and Kut, Alp},
-  journal={Data \& knowledge engineering},
+  journal={Data \\& knowledge engineering},
   volume={60},
   number={1},
   pages={208--221},
@@ -29,114 +30,103 @@ type: "GridCell", "Random"
   "GridCell": To narrow down the number of adjacent grid points, only points nb[n] with target (v[i] - v[n]) <= Δϵ are counted as adjacent points.
   "Random" : use nb[n] ## There are no regulations
 minPts: minimum size of Neighbors. if Neighbors >= Δϵ then nb[i] will be a cluster.
-=#
+"""
 function st_dbscan(nb,
-                   vals::Tuple...;
+                   vals::NamedTuple...;
                    type::String = "GridCell",
                    minPts::Int64 = 10)
-    
+
     ## set cluster number
     cluster::Int64 = 0;
 
     ## set cluster label array
-    label = fill("", length(nb));
-
+    label = fill("", size(nb));
+    
     ## ST-DBSCAN
     println("\nStart Clustering:  ", now())
-    @showprogress for i in eachindex(nb)
-        ## if label == "Noise" then not run.
-        #println("Process: " * string(i) * "/" * string(length(nb)))
+    @showprogress for nb_num in 1:length(nb)
+        i = nb[nb_num];
         if isempty(nb[i])
-            #println("Skip: Number " * string(i) * " have not Neighbors.")
-            label[i] = "Noise";
-	elseif isempty(label[i]) || label[i] == "Noise"
+            label[i] .= "Noise";
+            label[nb_num] = "Noise";
+	elseif any(isempty.(label[i])) || label[i] == "Noise"
             ## 格子データを用いる場合
             if type == "GridCell"
-                # strClust = [];                
-	        strClust =  map(vals) do x
-	            nb[i][findall(<=(x[2]), abs.(x[1][i] .- x[1][nb[i]]))]
-                end |> intersects;
-                # strClust = searchNb(vals, nb[i], i);
+                strClust = reduce(intersect, map(vals) do x
+                    ifelse.(abs.(x.D[1] .- x.D[i]) .<= x.Δϵ, nb[i], nothing)
+                end);
             elseif type == "Random"
                 strClust = nb[i];
             end
             ## minPtsよりクラスター数が少ない場合は "Noise" 判定
             if length(strClust) <= length(nb[i]) < minPts
-                label[i] = "Noise";
+                label[i] .= "Noise";
+                label[nb_num] = "Noise";
             elseif minPts <= length(strClust) <= length(nb[i])
                 ## up to cluster number
                 cluster += 1;
-                label[i] = string(cluster);
-                println("\n --- Create Cluster : " * string(cluster));
+                label[i] .= string(cluster);
+                label[nb_num] = string(cluster);
+                
+                #println("\t--- Create Cluster: " * string(cluster));
 
                 ## check cluster
                 if type == "GridCell"
-	            label[strClust] .= string(cluster);
-                    label[setdiff(nb[i], strClust)] .= "Noise";
+	            label[getUnique(strClust)] .= string(cluster);
+                    label[setdiff(getUnique(nb[i]), getUnique(strClust))] .= "Noise";
                 elseif type == "Random"
-                    label[nb[i]] .= string(cluster);
+                    label[getUnique(nb[i])] .= string(cluster);
                 end
 
                 ## check node and Add Cluster.
                 num = nb[i];
                 while length(num) !== 0
                     nodeList = pmap(vals) do x
-
                         ## search cluster value
-                        m = x[1][findall(==(string(cluster)), label)];
-
+                        m = x.D[findall(x -> x == string(cluster), label)];
+                        
                         ## check nb =====
-	                linkNb = unions(nb[num]);
+                        linkNb = reduce(Base.union, nb[getUnique(num)]);
                         if length(linkNb) == 1
 	                    linkNb = linkNb[1]
                         end
                         if type == "GridCell"
-                            fitNb = map(linkNb) do l
-                                #nbs = searchNb(vals, nb[x], i);
-                                #nbs = nb[x];
-                                # nbs = Statistics.mean(vcat(m, nb[l]));
-                                xd = x[1][nb[l]];
-	                        μ = Statistics.mean(vcat(m, xd));
-                                nbs = nb[l][findall(<=(x[2]), abs.(μ .- xd))];
-                                if length(nbs) >= minPts
-	                            return(nbs);
-                                else
-                                    return([]);
-                                end
-                            end |> unions;
+                            fitNb = reduce(Base.union, map(linkNb) do l
+                                               xd = x.D[nb[l]];
+	                                       μ = Statistics.mean(vcat(m, xd));
+                                               nbs = nb[l][findall(y -> y <= x.Δϵ, abs.(μ .- xd))];
+                                               return ifelse(length(nbs) >= minPts, nbs, []);
+                                           end);
                             if length(fitNb) == 1
 	                        fitNb = fitNb[1]
                             end
                         elseif type == "Random"
                             fitNb = linkNb;
                         end
-                        checkNb = setdiff(fitNb, num);
+                        checkNb = setdiff(fitNb, getUnique(num));
                         linkNb = nothing;
                         fitNb = nothing;
-
+                        
                         ## Fit Cluster:: search node =====
                         empNode = checkNb[isempty.(label[checkNb])];
-                        # empNode = checkNb[findall(x -> isempty(x), label[checkNb]) ∩
-                        #     findall(x -> x != "Noise", label[checkNb])];
-                        
                         add = [];
                         for n in empNode
-	                    μ = Statistics.mean(vcat(m, x[1][add]));
-                            if abs(μ - x[1][n]) <= x[2]
+	                    μ = Statistics.mean(vcat(m, x.D[add]));
+                            if abs(μ - x.D[n]) <= x.Δϵ
 	                        push!(add, n);
                             end
                             μ = nothing;
                         end
                         return(add)
-                    end;
+                    end; 
+
                     if length(nodeList) !== 0
-	                node = intersects(nodeList);
+                        node = reduce(intersect, nodeList);
                         nodeList = nothing;
                     else
                         node = [];
                     end
                     if length(node) !== 0
-                        #println("- Add point for cluster-" * string(cluster) * " : " * join(node, " "))
                         label[node] .= string(cluster);
                         num = node;
                     else
@@ -144,254 +134,27 @@ function st_dbscan(nb,
                     end
                 end
             else
-                label[i] = "Noise";
+                label[i] .= "Noise";
+                label[nb_num] = "Noise";
             end
         end
     end
-    println("\n ", now(), " Completed.")
-    return(label)
+    println("\n ", now(), " Completed.");
+    println("Create Cluster: ", join(sort(unique(label)), ", "));
+    count2(label)
+    return label;
 end
-function st_dbscan(nb,
-                   vals::Tuple;
-                   type::String = "GridCell",
-                   minPts::Int64 = 10)
-    
-    ## set cluster number
-    cluster::Int64 = 0;
 
-    ## set cluster label array
-    label = fill("", length(nb));
-
-    ## ST-DBSCAN
-    println("\nStart Clustering:  ", now())
-    @showprogress for i in eachindex(nb)
-        ## if label == "Noise" then not run.
-        #println("Process: " * string(i) * "/" * string(length(nb)))
-        if isempty(nb[i])
-            #println("Skip: Number " * string(i) * " have not Neighbors.")
-            label[i] = "Noise";
-	elseif isempty(label[i]) || label[i] == "Noise"
-            ## 格子データを用いる場合
-            if type == "GridCell"
-                strClust = nb[i][findall(<=(vals[2]), abs.(vals[1][i] .- vals[1][nb[i]]))]
-            elseif type == "Random"
-                strClust = nb[i];
-            end
-            ## minPtsよりクラスター数が少ない場合は "Noise" 判定
-            if length(strClust) <= length(nb[i]) < minPts
-                label[i] = "Noise";
-            elseif minPts <= length(strClust) <= length(nb[i])
-                ## up to cluster number
-                cluster += 1;
-                label[i] = string(cluster);
-                println("\n --- Create Cluster : " * string(cluster));
-
-                ## check cluster
-                if type == "GridCell"
-	            label[strClust] .= string(cluster);
-                    label[setdiff(nb[i], strClust)] .= "Noise";
-                elseif type == "Random"
-                    label[nb[i]] .= string(cluster);
-                end
-
-                ## check node and Add Cluster.
-                num = nb[i];
-                while length(num) !== 0
-                    ## search cluster value
-                    m = vals[1][findall(==(string(cluster)), label)];
-
-                    ## check nb =====
-	            linkNb = unions(nb[num]);
-                    if length(linkNb) == 1
-	                linkNb = linkNb[1]
-                    end
-                    if type == "GridCell"
-                        fitNb = map(linkNb) do l
-                            #nbs = searchNb(vals, nb[x], i);
-                            #nbs = nb[x];
-                            # nbs = Statistics.mean(vcat(m, nb[l]));
-                            xd = vals[1][nb[l]];
-	                    μ = Statistics.mean(vcat(m, xd));
-                            nbs = nb[l][findall(<=(vals[2]), abs.(μ .- xd))];
-                            if length(nbs) >= minPts
-	                        return(nbs);
-                            else
-                                return([]);
-                            end
-                        end |> unions;
-                        if length(fitNb) == 1
-	                    fitNb = fitNb[1]
-                        end
-                    elseif type == "Random"
-                        fitNb = linkNb;
-                    end
-                    checkNb = setdiff(fitNb, num);
-                    linkNb = nothing;
-                    fitNb = nothing;
-
-                    ## Fit Cluster:: search node =====
-                    empNode = checkNb[isempty.(label[checkNb])];
-
-                    nodeList = [];
-                    for n in empNode
-	                μ = Statistics.mean(vcat(m, vals[1][nodeList]));
-                        if abs(μ - vals[1][n]) <= vals[2]
-	                    push!(nodeList, n);
-                        end
-                        μ = nothing;
-                    end
-                    if length(nodeList) !== 0
-	                node = intersects(nodeList);
-                        nodeList = nothing;
-                    else
-                        node = [];
-                    end
-                    if length(node) !== 0
-                        #println("- Add point for cluster-" * string(cluster) * " : " * join(node, " "))
-                        label[node] .= string(cluster);
-                        num = node;
-                    else
-                        num = [];
-                    end
-                end
-            else
-                label[i] = "Noise";
-            end
-        end
+function count2(x::Array)
+    for pr in sort(unique(x))
+        println("$pr => ", findall(y -> y == pr, x) |> length)
     end
-    println("\n ", now(), " Completed.")
-    return(label)
 end
-# function st_dbscan(nb,
-#                    vals::Tuple...;
-#                    type::String = "GridCell",
-#                    minPts::Int64 = 10)
-    
-#     ## set cluster number
-#     cluster::Int64 = 0;
-
-#     ## set cluster label array
-#     label = fill("", length(nb));
-
-#     ## ST-DBSCAN
-#     println("\nStart Clustering:  ", now())
-#     @showprogress for i in eachindex(nb)
-#         ## if label == "Noise" then not run.
-#         #println("Process: " * string(i) * "/" * string(length(nb)))
-#         if isempty(nb[i])
-#             #println("Skip: Number " * string(i) * " have not Neighbors.")
-#             label[i] = "Noise";
-# 	elseif isempty(label[i]) || label[i] == "Noise"
-#             ## 格子データを用いる場合
-#             if type == "GridCell"
-#                 # strClust = [];                
-# 	        strClust =  map(vals) do x
-# 	            nb[i][findall(<=(x[2]), abs.(x[1][i] .- x[1][nb[i]]))]
-#                 end |> intersects;
-#                 # strClust = searchNb(vals, nb[i], i);
-#             else
-#                 strClust = nb[i];
-#             end
-#             ## minPtsよりクラスター数が少ない場合は "Noise" 判定
-#             if length(strClust) <= length(nb[i]) < minPts
-#                 label[i] = "Noise";
-#             elseif minPts <= length(strClust) <= length(nb[i])
-#                 ## up to cluster number
-#                 cluster += 1;
-#                 label[i] = string(cluster);
-#                 println("\n --- Create Cluster : " * string(cluster));
-
-#                 ## check cluster
-#                 if type == "GridCell"
-# 	            label[strClust] .= string(cluster);
-#                     label[setdiff(nb[i], strClust)] .= "Noise";
-#                 else
-#                     label[nb[i]] .= string(cluster);
-#                 end
-
-#                 ## check node and Add Cluster.
-#                 num = nb[i];
-#                 while length(num) !== 0
-#                     nodeList = map(vals) do x
-
-#                         ## search cluster value
-#                         m = x[1][findall(==(string(cluster)), label)];
-
-#                         ## check nb =====
-# 	                linkNb = unions(nb[num]);
-#                         if length(linkNb) == 1
-# 	                    linkNb = linkNb[1]
-#                         end
-#                         if type == "GridCell"
-#                             fitNb = map(linkNb) do l
-#                                 #nbs = searchNb(vals, nb[x], i);
-#                                 #nbs = nb[x];
-#                                 # nbs = Statistics.mean(vcat(m, nb[l]));
-#                                 xd = x[1][nb[l]];
-# 	                        μ = Statistics.mean(vcat(m, xd));
-#                                 nbs = nb[l][findall(<=(x[2]), abs.(μ .- xd))];
-#                                 if length(nbs) >= minPts
-# 	                            return(nbs);
-#                                 else
-#                                     return([]);
-#                                 end
-#                             end |> unions;
-#                             if length(fitNb) == 1
-# 	                        fitNb = fitNb[1]
-#                             end
-#                         else
-#                             fitNb = linkNb;
-#                         end
-#                         checkNb = setdiff(fitNb, num);
-#                         linkNb = nothing;
-#                         fitNb = nothing;
-
-#                         ## Fit Cluster:: search node =====
-#                         empNode = checkNb[isempty.(label[checkNb])];
-#                         # if isempty(empNode)
-# 	                #     print([]);
-#                         # end
-
-#                         add = [];
-#                         for n in empNode
-# 	                    μ = Statistics.mean(vcat(m, x[1][add]));
-#                             if abs(μ - x[1][n]) <= x[2]
-# 	                        push!(add, n);
-#                             end
-#                             μ = nothing;
-#                         end
-#                         return(add)
-#                     end;
-#                     if length(nodeList) !== 0
-# 	                node = intersects(nodeList);
-#                         nodeList = nothing;
-#                     else
-#                         node = [];
-#                     end
-#                     if length(node) !== 0
-#                         #println("- Add point for cluster-" * string(cluster) * " : " * join(node, " "))
-#                         label[node] .= string(cluster);
-#                         num = node;
-#                     else
-#                         num = [];
-#                     end
-#                 end
-#             else
-#                 label[i] = "Noise";
-#             end          
-#         end
-#     end
-#     println("\n ", now(), " Completed.")
-#     return(label)
-# end
-# @benchmark st_dbscan(nb, (v, Δϵ), minPts = 3)
-# function fitClust(label, value, target, node, Δϵ)
-#     node[findall(<=(Δϵ), abs.(target .- value[node]))]
-# end
 
 
 
-#=
+
+"""
 地点別に隣接点行列を作成
 x: x成分(経度)
 y: y成分(緯度)
@@ -402,7 +165,7 @@ eps2: 時間間隔の最大値
 method: 距離の計算方法の指定
   "geo": 地理空間上の距離[km]として計算 use geoSailing
   "euclidian": ユークリッド距離として計算
-=#
+"""
 function stnb(x::Vector{Float64},
               y::Vector{Float64},
               time;
@@ -437,32 +200,6 @@ function stnb(x::Vector{Float64},
 
     return ret;
 end
-# function stnb(x::Vector{Float64},
-#               y::Vector{Float64},
-#               time;
-#               eps0::Int64 = 0,
-#               eps1::Int64,
-#               eps2,
-#               method::String = "geo")
-    
-#     # set output frame
-#     len = length(x)
-#     timediff = map(time) do t
-# 	#abs.(time .- t);
-#         findall(x -> x <= eps2, abs.(time .- t))
-#     end
-#     ret = fill([], len, length(time))
-#     #@showprogress @inbounds @simd for i in eachindex(x)
-#     @showprogress for i in eachindex(x)        
-# 	g = findall(x -> eps0 <= x <= eps1, dist.(x, y, x[i], y[i], method = method))
-#         d = map(timediff) do t
-#             setdiff(vec(g .+ ((t .- 1) .* len)'), i)
-#         end
-#         ret[i, :] .= d
-#     end
-#     return ret;
-# end
-# @benchmark nb = stnb(x1, y1, time, eps1 = eps1, eps2 = eps2, method = "geo")
 
 
 #=
@@ -545,61 +282,65 @@ function searchNb(vals, nb, i)
     clList =  map(vals) do x
 	nb[findall(<=(x[2]), abs.(x[1][i] .- x[1][nb]))]
     end
-    intersects(clList);
+    return (reduce(intersect, clList))
+end
+function getUnique(x::Vector)
+    return unique(reduce(vcat, x));
 end
 
-function merge2(x::Tuple)
-    if length(x) == 1
-        x
-    elseif length(x) == 2
-        vcat(x[1], x[2])
-    else
-        vcat(x[begin], merge2(x[begin+1:end]))
-    end
-end
-function intersects(x)
-    if length(x) <= 1
-	x
-    elseif length(x) == 2
-        intersect(x[1], x[2])
-    else
-        intersect(x[1], intersects(x[2:end]))
-    end
-end
-function unions(x)
-    if length(x) <= 1
-	x
-    elseif length(x) == 2
-        union(x[1], x[2])
-    else
-        union(x[1], unions(x[2:end]))
-    end
-end
-function rbind(x)
-    if length(x) == 2
-	vcat(x[1], x[2])
-    else
-        vcat(x[1], rbind(x[2:end]))
-    end
-end
 
-function getSkipData(x, y;
-                     skip_x::Int64 = 0,
-                     skip_y::Int64 = 0,
-                     interval_x::Int64 = 5,
-                     interval_y::Int64 = 5)
-    xskip = sort(unique(x), rev = false);
-    xs = xskip[1 + skip_x:interval_x:length(xskip)];
-    yskip = sort(unique(y), rev = true);
-    ys = yskip[1 + skip_y:interval_y:length(yskip)];
-    boolxy = findall(x -> x ∈ xs, x) ∩ findall(y -> y ∈ ys, y)
-    # zz = map(z) do zz
-    #     zz[boolxy]
-    # end
-    geo = allcombinations(DataFrame,
-                          x = xs,
-                          y = ys)
+# function merge2(x::Tuple)
+#     if length(x) == 1
+#         x
+#     elseif length(x) == 2
+#         vcat(x[1], x[2])
+#     else
+#         vcat(x[begin], merge2(x[begin+1:end]))
+#     end
+# end
+# function intersects(x)
+#     if length(x) <= 1
+# 	x
+#     elseif length(x) == 2
+#         intersect(x[1], x[2])
+#     else
+#         intersect(x[1], intersects(x[2:end]))
+#     end
+# end
+# function unions(x)
+#     if length(x) <= 1
+# 	x
+#     elseif length(x) == 2
+#         union(x[1], x[2])
+#     else
+#         union(x[1], unions(x[2:end]))
+#     end
+# end
+# function rbind(x)
+#     if length(x) == 2
+# 	vcat(x[1], x[2])
+#     else
+#         vcat(x[1], rbind(x[2:end]))
+#     end
+# end
 
-    #return (x = geo.x, y = geo.y, z = zz)
-    return (df = geo, num = boolxy)
-end
+# function getSkipData(x, y;
+#                      skip_x::Int64 = 0,
+#                      skip_y::Int64 = 0,
+#                      interval_x::Int64 = 5,
+#                      interval_y::Int64 = 5)
+#     xskip = sort(unique(x), rev = false);
+#     xs = xskip[1 + skip_x:interval_x:length(xskip)];
+#     yskip = sort(unique(y), rev = true);
+#     ys = yskip[1 + skip_y:interval_y:length(yskip)];
+#     boolxy = findall(x -> x ∈ xs, x) ∩ findall(y -> y ∈ ys, y)
+#     # zz = map(z) do zz
+#     #     zz[boolxy]
+#     # end
+#     geo = allcombinations(DataFrame,
+#                           x = xs,
+#                           y = ys)
+
+#     #return (x = geo.x, y = geo.y, z = zz)
+#     return (df = geo, num = boolxy)
+# end
