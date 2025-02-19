@@ -15,6 +15,7 @@ using GeoFormatTypes
 using Statistics
 using GDAL
 using ArchGDAL
+using GeoJSON
 
 
 """
