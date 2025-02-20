@@ -44,23 +44,24 @@ function st_dbscan(nb,
     
     ## ST-DBSCAN
     println("\nStart Clustering:  ", now())
-    @showprogress for nb_num in 1:length(nb)
+    @showprogress for nb_num in range(1, stop = length(nb), step = 1)
+        println(nb_num)
         i = nb[nb_num];
-        if isempty(nb[i])
-            label[i] .= "Noise";
+        if isempty(nb[nb_num]) #isempty(nb[i])
+            #label[i] .= "Noise";
             label[nb_num] = "Noise";
-	elseif any(isempty.(label[i])) || label[i] == "Noise"
+        elseif isempty(label[nb_num]) || label[nb_num] == "Noise" # any(isempty.(label[i])) || any(label[i] .== "Noise")
             ## 格子データを用いる場合
             if type == "GridCell"
-                strClust = reduce(intersect, map(vals) do x
+                strClust = filter(!isnothing, reduce(intersect, map(vals) do x
                     ifelse.(abs.(x.D[1] .- x.D[i]) .<= x.Δϵ, nb[i], nothing)
-                end);
+                end));
             elseif type == "Random"
                 strClust = nb[i];
             end
             ## minPtsよりクラスター数が少ない場合は "Noise" 判定
             if length(strClust) <= length(nb[i]) < minPts
-                label[i] .= "Noise";
+                #label[i] .= "Noise";
                 label[nb_num] = "Noise";
             elseif minPts <= length(strClust) <= length(nb[i])
                 ## up to cluster number
